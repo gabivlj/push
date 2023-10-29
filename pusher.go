@@ -304,6 +304,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		return fmt.Errorf("unexpected status code creating upload %v: %v", res.StatusCode, readAllBody(res.Body))
 	}
 
+	fmt.Println("Finished correctly.")
 	res.Body.Close()
 	return nil
 }
