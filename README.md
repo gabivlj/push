@@ -17,3 +17,6 @@ No authentication is implemented yet, that is in the roadmap soon.
 This is just a thing that I wanted to work on to try to have a 
 faster `docker push` that is simpler to maintain, and doesn't 
 compress layers.
+
+## Warning
+This is experimental and mostly to learn more about how Docker stores layers, use at your own risk.
