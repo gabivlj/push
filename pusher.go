@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,7 +39,6 @@ func (p *pusher) push(ctx context.Context, url, repository, name string) error {
 	errChann := make(chan error, m)
 	jobs := make([]pushJob, 0, len(p.manifest.Layers)+1)
 	for _, layer := range p.manifest.Layers {
-		fmt.Println("Adding push job...", layer)
 		jobs = append(jobs, pushJob{
 			layerID:    layer.Digest,
 			size:       layer.Size,
@@ -74,7 +74,6 @@ forLoop:
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-done:
-			fmt.Println("Done one")
 			job := jobs[len(jobs)-1]
 			job.startPush(ctx, wg)
 			jobs = jobs[:len(jobs)-1]
@@ -82,7 +81,6 @@ forLoop:
 				break forLoop
 			}
 		case err := <-errChann:
-			fmt.Println("Error channel, cancel", err)
 			cancel()
 			return fmt.Errorf("pushing layer: %w", err)
 		}
@@ -92,13 +90,10 @@ forLoop:
 	go func() {
 		wg.Wait()
 		allDone <- struct{}{}
-		fmt.Println("Finished")
 	}()
 
-	fmt.Println("Waiting for all layers to finish")
 	select {
 	case err := <-errChann:
-		fmt.Println("error channel:", err)
 		cancel()
 		select {
 		case <-allDone:
@@ -109,6 +104,34 @@ forLoop:
 	case <-allDone:
 	}
 
+	c := &http.Client{}
+	reader, writer := io.Pipe()
+	defer reader.Close()
+	defer writer.Close()
+	encoder := json.NewEncoder(writer)
+	go func() {
+		if err := encoder.Encode(p.manifest); err != nil {
+			fmt.Fprintln(os.Stderr, "warning encoding manifest:", err.Error())
+		}
+		writer.Close()
+	}()
+
+	req, err := http.NewRequest(http.MethodPut, url+path.Join("/v2", repository, "manifests", name), reader)
+	if err != nil {
+		return fmt.Errorf("manifest: %w", err)
+	}
+
+	req.Header.Add("Content-Type", p.manifest.MediaType)
+	res, err := c.Do(req)
+	if err != nil {
+		return fmt.Errorf("manifest request: %w", err)
+	}
+
+	if res.StatusCode >= 300 {
+		return fmt.Errorf("unexpected status code creating manifest: %w", err)
+	}
+
+	res.Body.Close()
 	return nil
 }
 
@@ -135,7 +158,6 @@ func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 
 			p.errChan <- fmt.Errorf("layer %q: %w", p.layerID, err)
 		} else {
-			fmt.Println("Done", p.layerID, "...")
 			p.done <- struct{}{}
 		}
 	}()
@@ -175,7 +197,6 @@ func (p *pushJob) push(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println("req", p.layerID, req.Method, req.URL, p)
 	res, err := c.Do(req.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("head: %w", err)
@@ -191,7 +212,6 @@ func (p *pushJob) push(ctx context.Context) error {
 		return err
 	}
 
-	fmt.Println("req", p.layerID, req.Method, req.URL)
 	res, err = c.Do(req.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("post uploads: %w", err)
@@ -231,7 +251,6 @@ func (p *pushJob) push(ctx context.Context) error {
 			return err
 		}
 
-		fmt.Println("req", p.layerID, req.Method, req.URL)
 		req.Header.Add("Content-Type", contentType)
 		req.Header.Add("Content-Length", contentLength)
 		req.Header.Add("Content-Range", rangeHeader)
@@ -276,7 +295,6 @@ func (p *pushJob) push(ctx context.Context) error {
 	}
 
 	req.Header.Add("Content-Length", "0")
-	fmt.Println("req", p.layerID, req.Method, req.URL)
 	res, err = c.Do(req.WithContext(ctx))
 	if err != nil {
 		return fmt.Errorf("creating upload: %w", err)
