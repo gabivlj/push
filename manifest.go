@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -78,14 +79,22 @@ func (r RepositoryTag) getDockerPath() string {
 	return fmt.Sprintf("/var/lib/docker/image/overlay2/imagedb/content/sha256/%s", strings.Split(string(r), ":")[1])
 }
 
-func (r RepositoryTag) IntoImageConfig() (ImageConfig, int64, error) {
+func (r RepositoryTag) IntoImageConfig(folder string) (ImageConfig, int64, error) {
 	p := r.getDockerPath()
 	fd, err := os.Open(p)
 	if err != nil {
 		return ImageConfig{}, 0, fmt.Errorf("open %q: %w", p, err)
 	}
 
-	decoder := json.NewDecoder(fd)
+	defer fd.Close()
+	fdLayer, err := os.Create(filepath.Join(folder, string(r)))
+	if err != nil {
+		return ImageConfig{}, 0, fmt.Errorf("create layers %q: %w", r, err)
+	}
+
+	defer fdLayer.Close()
+	reader := io.TeeReader(fd, fdLayer)
+	decoder := json.NewDecoder(reader)
 	config := ImageConfig{}
 	if err := decoder.Decode(&config); err != nil {
 		return ImageConfig{}, 0, fmt.Errorf("decode: %w", err)
@@ -132,7 +141,7 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		return Manifest{}, fmt.Errorf("get config: %w", err)
 	}
 
-	config, configSize, err := sha.IntoImageConfig()
+	config, configSize, err := sha.IntoImageConfig("./layers")
 	if err != nil {
 		return Manifest{}, fmt.Errorf("image config: %w", err)
 	}
