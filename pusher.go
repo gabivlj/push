@@ -74,6 +74,10 @@ forLoop:
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-done:
+			if len(jobs) == 0 {
+				break forLoop
+			}
+
 			job := jobs[len(jobs)-1]
 			job.startPush(ctx, wg)
 			jobs = jobs[:len(jobs)-1]
@@ -227,8 +231,12 @@ func (p *pushJob) push(ctx context.Context) error {
 		locationForThisUpload = urlLocation.String()
 	}
 
-	// TODO: SUpposedly we should fill these from the response header Range of POST
+	_, possibleStart, err := getRangeHeader(res)
 	start := uint64(0)
+	if err == nil && possibleStart != 0 {
+		start = possibleStart + 1
+	}
+
 	end := p.size
 	fd, err := os.Open("layers/" + p.layerID)
 	if err != nil {
