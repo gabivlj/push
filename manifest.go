@@ -116,7 +116,7 @@ func (r Repositories) getConfigSHA256(name, tag string) (RepositoryTag, error) {
 	return sha, nil
 }
 
-func generateManifestFromDocker(ctx context.Context, imageURL string) (Manifest, error) {
+func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (Manifest, error) {
 	repositories, err := getRepositories(ctx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("get repositories: %w", err)
@@ -138,8 +138,15 @@ func generateManifestFromDocker(ctx context.Context, imageURL string) (Manifest,
 	}
 
 	layers := make([]*layerReader, 0, len(config.Rootfs.DiffIDs))
+	var prevNode *node
 	for _, layer := range config.Rootfs.DiffIDs {
-		reader, err := newLayerReader(layer)
+		if prevNode == nil {
+			prevNode = db.Get(layer)
+		} else {
+			prevNode = db.GetChild(prevNode, layer)
+		}
+
+		reader, err := newLayerReader(prevNode)
 		if err != nil {
 			return Manifest{}, fmt.Errorf("create layer reader %q: %w", layer, err)
 		}

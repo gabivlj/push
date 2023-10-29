@@ -51,8 +51,8 @@ func (l *layerReader) Read(b []byte) (int, error) {
 }
 
 // TODO build chain of things
-func newLayerReader(diffID string) (*layerReader, error) {
-	p := filepath.Join("/var", "lib", "docker", "image", storageDriver, "layerdb", "sha256", strings.Split(diffID, ":")[1])
+func newLayerReader(n *node) (*layerReader, error) {
+	p := filepath.Join("/var", "lib", "docker", "image", storageDriver, "layerdb", "sha256", strings.Split(n.id, ":")[1])
 	cacheIDPath := filepath.Join(p, "cache-id")
 	cacheBytes, err := os.ReadFile(cacheIDPath)
 	if err != nil {
