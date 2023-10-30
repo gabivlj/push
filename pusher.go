@@ -271,6 +271,11 @@ func (p *pushJob) push(ctx context.Context) error {
 		start = possibleStart + 1
 	}
 
+	ociMaxChunkSize, err := strconv.Atoi(res.Header.Get("OCI-Chunk-Max-Length"))
+	if err != nil {
+		ociMaxChunkSize = -1
+	}
+
 	end := p.size
 	fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
 	if err != nil {
@@ -279,7 +284,7 @@ func (p *pushJob) push(ctx context.Context) error {
 
 	for {
 		if start != 0 {
-			fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
+			fd, err = os.Open(filepath.Join(layerFolder, p.layerID))
 			if err != nil {
 				return fmt.Errorf("opening layer file: %w", err)
 			}
@@ -290,10 +295,18 @@ func (p *pushJob) push(ctx context.Context) error {
 			}
 		}
 
+		if ociMaxChunkSize != -1 && end-start > uint64(ociMaxChunkSize) {
+			end = start + uint64(ociMaxChunkSize)
+			if end >= p.size {
+				end = p.size
+			}
+		}
+
 		rangeHeader := fmt.Sprintf("%d-%d", start, end-1)
 		contentType := "application/octet-stream"
-		contentLength := fmt.Sprintf("%d", end-start)
-		req, err := http.NewRequest("PATCH", locationForThisUpload, fd)
+		length := end - start
+		contentLength := fmt.Sprintf("%d", length)
+		req, err := http.NewRequest("PATCH", locationForThisUpload, io.LimitReader(fd, int64(length)))
 		if err != nil {
 			return err
 		}
@@ -321,6 +334,7 @@ func (p *pushJob) push(ctx context.Context) error {
 			locationForThisUpload = urlLocation.String()
 		}
 
+		end = p.size
 		if endRes >= end-1 {
 			break
 		}
