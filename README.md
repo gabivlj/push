@@ -11,7 +11,7 @@ push my-image:1.0 my-repo/hello-world:1.0
 ## Support
 Right now, it only works in Linux and overlay2, and only tested with docker 24.0.
 
-No authentication is implemented yet, that is in the roadmap soon.
+Authorization is only done with username password with --password-stdin and --username.
 
 ## Why?
 This is just a thing that I wanted to work on to try to have a 

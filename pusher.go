@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,14 +19,29 @@ import (
 )
 
 type pusher struct {
-	manifest    *Manifest
-	maxPushJobs int
+	manifest      *Manifest
+	maxPushJobs   int
+	configuration *configuration
 }
 
-func newPusher(manifest *Manifest, maxPushJobs int) *pusher {
+type configuration struct {
+	username string
+	password string
+}
+
+func newPusher(manifest *Manifest, maxPushJobs int, c *configuration) *pusher {
 	return &pusher{
-		manifest, maxPushJobs,
+		manifest, maxPushJobs, c,
 	}
+}
+
+func (p *pusher) getAuthorizationHeader() string {
+	if p.configuration.username == "" {
+		return ""
+	}
+
+	s := fmt.Sprintf("%s:%s", p.configuration.username, p.configuration.password)
+	return fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(s)))
 }
 
 func (p *pusher) push(ctx context.Context, url, repository, name string) error {
@@ -37,31 +53,34 @@ func (p *pusher) push(ctx context.Context, url, repository, name string) error {
 		m = len(p.manifest.Layers) + 1
 	}
 
+	authorizationHeader := p.getAuthorizationHeader()
 	done := make(chan struct{}, m)
 	errChann := make(chan error, m)
 	jobs := make([]pushJob, 0, len(p.manifest.Layers)+1)
 	for _, layer := range p.manifest.Layers {
 		jobs = append(jobs, pushJob{
-			layerID:    layer.Digest,
-			size:       layer.Size,
-			mediaType:  layer.MediaType,
-			done:       done,
-			errChan:    errChann,
-			url:        url,
-			name:       name,
-			repository: repository,
+			layerID:             layer.Digest,
+			size:                layer.Size,
+			mediaType:           layer.MediaType,
+			done:                done,
+			errChan:             errChann,
+			url:                 url,
+			name:                name,
+			repository:          repository,
+			authorizationHeader: authorizationHeader,
 		})
 	}
 
 	jobs = append(jobs, pushJob{
-		layerID:    p.manifest.Config.Digest,
-		mediaType:  p.manifest.Config.MediaType,
-		size:       p.manifest.Config.Size,
-		url:        url,
-		name:       name,
-		repository: repository,
-		done:       done,
-		errChan:    errChann,
+		layerID:             p.manifest.Config.Digest,
+		mediaType:           p.manifest.Config.MediaType,
+		size:                p.manifest.Config.Size,
+		url:                 url,
+		name:                name,
+		repository:          repository,
+		done:                done,
+		errChan:             errChann,
+		authorizationHeader: authorizationHeader,
 	})
 
 	for i := 0; i < m; i++ {
@@ -128,13 +147,13 @@ forLoop:
 	}
 
 	req.Header.Add("Content-Type", p.manifest.MediaType)
-	res, err := c.Do(req)
+	res, err := c.Do(auth(req.WithContext(ctx), authorizationHeader))
 	if err != nil {
 		return fmt.Errorf("manifest request: %w", err)
 	}
 
 	if res.StatusCode >= 300 {
-		return fmt.Errorf("unexpected status code creating manifest: %w", err)
+		return fmt.Errorf("unexpected status code creating manifest: %v", readAllBody(res.Body))
 	}
 
 	res.Body.Close()
@@ -142,14 +161,15 @@ forLoop:
 }
 
 type pushJob struct {
-	url        string
-	repository string
-	name       string
-	layerID    string
-	size       uint64
-	mediaType  string
-	errChan    chan<- error
-	done       chan<- struct{}
+	url                 string
+	repository          string
+	name                string
+	layerID             string
+	size                uint64
+	mediaType           string
+	authorizationHeader string
+	errChan             chan<- error
+	done                chan<- struct{}
 }
 
 func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
@@ -198,6 +218,16 @@ func getRangeHeader(res *http.Response) (uint64, uint64, error) {
 	return start, end, nil
 }
 
+func auth(r *http.Request, auth string) *http.Request {
+	r.Header.Add("Authorization", auth)
+	return r
+}
+
+func (p *pushJob) auth(r *http.Request) *http.Request {
+	r.Header.Add("Authorization", p.authorizationHeader)
+	return r
+}
+
 func (p *pushJob) push(ctx context.Context) error {
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
@@ -205,7 +235,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		return err
 	}
 
-	res, err := c.Do(req.WithContext(ctx))
+	res, err := c.Do(p.auth(req.WithContext(ctx)))
 	if err != nil {
 		return fmt.Errorf("head: %w", err)
 	}
@@ -220,7 +250,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		return err
 	}
 
-	res, err = c.Do(req.WithContext(ctx))
+	res, err = c.Do(p.auth(req.WithContext(ctx)))
 	if err != nil {
 		return fmt.Errorf("post uploads: %w", err)
 	}
@@ -271,7 +301,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		req.Header.Add("Content-Type", contentType)
 		req.Header.Add("Content-Length", contentLength)
 		req.Header.Add("Content-Range", rangeHeader)
-		res, err := c.Do(req.WithContext(ctx))
+		res, err := c.Do(p.auth(req.WithContext(ctx)))
 		if err != nil {
 			return fmt.Errorf("patch upload: %w", err)
 		}
@@ -313,7 +343,7 @@ func (p *pushJob) push(ctx context.Context) error {
 	}
 
 	req.Header.Add("Content-Length", "0")
-	res, err = c.Do(req.WithContext(ctx))
+	res, err = c.Do(p.auth(req.WithContext(ctx)))
 	if err != nil {
 		return fmt.Errorf("creating upload: %w", err)
 	}
