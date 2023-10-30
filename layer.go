@@ -15,6 +15,31 @@ import (
 	"github.com/vbatts/tar-split/tar/storage"
 )
 
+type LayerReader interface {
+	io.ReadCloser
+	Size() uint64
+	Hash() string
+}
+
+type noopLayer struct {
+	size uint64
+	hash string
+}
+
+func (n noopLayer) Size() uint64 {
+	return n.size
+}
+
+func (n noopLayer) Hash() string {
+	return n.hash
+}
+
+func (n noopLayer) Close() error { return nil }
+
+func (n noopLayer) Read(b []byte) (int, error) {
+	return int(n.size), io.EOF
+}
+
 type layerReader struct {
 	sha256    hash.Hash
 	tarReader io.Reader

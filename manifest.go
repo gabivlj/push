@@ -152,13 +152,21 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		return Manifest{}, fmt.Errorf("image config: %w", err)
 	}
 
-	layers := make([]*layerReader, 0, len(config.Rootfs.DiffIDs))
+	layers := make([]LayerReader, 0, len(config.Rootfs.DiffIDs))
 	var prevNode *node
+	wg := sync.WaitGroup{}
 	for _, layer := range config.Rootfs.DiffIDs {
+		wg.Add(1)
 		if prevNode == nil {
 			prevNode = db.Get(layer)
 		} else {
 			prevNode = db.GetChild(prevNode, layer)
+		}
+
+		p := filepath.Join(layerFolder, layer)
+		if stat, err := os.Stat(p); err == nil && stat != nil {
+			layers = append(layers, noopLayer{size: uint64(stat.Size()), hash: layer})
+			continue
 		}
 
 		reader, err := newLayerReader(prevNode)
@@ -170,15 +178,18 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		defer reader.Close()
 	}
 
-	wg := sync.WaitGroup{}
-	wg.Add(len(layers))
-
 	errs := make(chan error, len(layers))
 	for i, layer := range layers {
+		if _, isNoop := layer.(noopLayer); isNoop {
+			wg.Done()
+			continue
+		}
+
 		i, layer := i, layer
 		go func() {
 			defer wg.Done()
-			fd, err := os.Create(filepath.Join(layerFolder, config.Rootfs.DiffIDs[i]))
+			p := filepath.Join(layerFolder, config.Rootfs.DiffIDs[i])
+			fd, err := os.Create(p)
 			if err != nil {
 				errs <- fmt.Errorf("creating file %s: %w", config.Rootfs.DiffIDs[i], err)
 				return

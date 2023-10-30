@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 type pusher struct {
@@ -154,6 +155,7 @@ type pushJob struct {
 func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
+		n := time.Now()
 		defer wg.Done()
 		err := p.push(ctx)
 		if err != nil {
@@ -163,7 +165,7 @@ func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 
 			p.errChan <- fmt.Errorf("layer %q: %w", p.layerID, err)
 		} else {
-			fmt.Println("======> Finished layer", p.layerID)
+			fmt.Println("======> Finished layer", p.layerID, fmt.Sprintf("(%d", p.size), "bytes)", "in", time.Since(n).String())
 			p.done <- struct{}{}
 		}
 	}()
@@ -247,7 +249,12 @@ func (p *pushJob) push(ctx context.Context) error {
 
 	for {
 		if start != 0 {
-			_, err := fd.Seek(int64(start), 0)
+			fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
+			if err != nil {
+				return fmt.Errorf("opening layer file: %w", err)
+			}
+
+			_, err = fd.Seek(int64(start), 0)
 			if err != nil {
 				return fmt.Errorf("seek: %w", err)
 			}
@@ -289,6 +296,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		}
 
 		start = endRes + 1
+		fd.Close()
 	}
 
 	endURL, err := url.Parse(locationForThisUpload)

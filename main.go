@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
 func main() {
@@ -14,18 +15,22 @@ func main() {
 		os.Exit(-1)
 	}
 
+	n := time.Now()
+	fmt.Println("> Loading DB into memory")
 	db, err := newDb()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Error reading overlay2 database", err.Error())
 		os.Exit(1)
 	}
 
+	fmt.Println("> Copying layers from overlay2 to", layerFolder)
 	manifest, err := generateManifestFromDocker(context.Background(), os.Args[1], db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
 	}
 
+	fmt.Println("> Startup was done in", time.Since(n))
 	p := newPusher(&manifest, 3)
 	urlRaw := os.Args[2]
 	u, err := url.Parse("http://" + urlRaw)
@@ -41,4 +46,6 @@ func main() {
 		fmt.Fprintln(os.Stderr, "pushing image", err.Error())
 		os.Exit(1)
 	}
+
+	fmt.Println("> Finished in", time.Since(n))
 }
