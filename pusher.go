@@ -163,6 +163,7 @@ func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 
 			p.errChan <- fmt.Errorf("layer %q: %w", p.layerID, err)
 		} else {
+			fmt.Println("======> Finished layer", p.layerID)
 			p.done <- struct{}{}
 		}
 	}()
@@ -196,10 +197,6 @@ func getRangeHeader(res *http.Response) (uint64, uint64, error) {
 }
 
 func (p *pushJob) push(ctx context.Context) error {
-	defer func() {
-
-		fmt.Println("Finish push", p.layerID)
-	}()
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
 	if err != nil {
@@ -215,7 +212,6 @@ func (p *pushJob) push(ctx context.Context) error {
 		return nil
 	}
 
-	fmt.Println("Start push", p.layerID, "of size", p.size)
 	res.Body.Close()
 	req, err = http.NewRequest(http.MethodPost, p.url+path.Join("/v2", p.repository, "blobs", "uploads")+"/", nil)
 	if err != nil {
@@ -260,7 +256,6 @@ func (p *pushJob) push(ctx context.Context) error {
 		rangeHeader := fmt.Sprintf("%d-%d", start, end-1)
 		contentType := "application/octet-stream"
 		contentLength := fmt.Sprintf("%d", end-start)
-		fmt.Println("Sending patch")
 		req, err := http.NewRequest("PATCH", locationForThisUpload, fd)
 		if err != nil {
 			return err
@@ -289,7 +284,6 @@ func (p *pushJob) push(ctx context.Context) error {
 			locationForThisUpload = urlLocation.String()
 		}
 
-		fmt.Println("Finished patch", res.StatusCode, start, res.Header.Get("Range"))
 		if endRes >= end-1 {
 			break
 		}
@@ -320,7 +314,6 @@ func (p *pushJob) push(ctx context.Context) error {
 		return fmt.Errorf("unexpected status code creating upload %v: %v", res.StatusCode, readAllBody(res.Body))
 	}
 
-	fmt.Println("Finished correctly.")
 	res.Body.Close()
 	return nil
 }
