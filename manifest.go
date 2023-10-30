@@ -125,7 +125,13 @@ func (r Repositories) getConfigSHA256(name, tag string) (RepositoryTag, error) {
 	return sha, nil
 }
 
+const layerFolder = "/var/lib/push/layers"
+
 func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (Manifest, error) {
+	if err := os.MkdirAll(layerFolder, os.ModePerm); err != nil {
+		return Manifest{}, fmt.Errorf("layers: %w", err)
+	}
+
 	repositories, err := getRepositories(ctx)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("get repositories: %w", err)
@@ -141,7 +147,7 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		return Manifest{}, fmt.Errorf("get config: %w", err)
 	}
 
-	config, configSize, err := sha.IntoImageConfig("./layers")
+	config, configSize, err := sha.IntoImageConfig(layerFolder)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("image config: %w", err)
 	}
@@ -166,16 +172,13 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 
 	wg := sync.WaitGroup{}
 	wg.Add(len(layers))
-	if err := os.MkdirAll("./layers", os.ModePerm); err != nil {
-		return Manifest{}, fmt.Errorf("layers: %w", err)
-	}
 
 	errs := make(chan error, len(layers))
 	for i, layer := range layers {
 		i, layer := i, layer
 		go func() {
 			defer wg.Done()
-			fd, err := os.Create("./layers/" + config.Rootfs.DiffIDs[i])
+			fd, err := os.Create(filepath.Join(layerFolder, config.Rootfs.DiffIDs[i]))
 			if err != nil {
 				errs <- fmt.Errorf("creating file %s: %w", config.Rootfs.DiffIDs[i], err)
 				return

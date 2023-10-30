@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -195,6 +196,10 @@ func getRangeHeader(res *http.Response) (uint64, uint64, error) {
 }
 
 func (p *pushJob) push(ctx context.Context) error {
+	defer func() {
+
+		fmt.Println("Finish push", p.layerID)
+	}()
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
 	if err != nil {
@@ -210,6 +215,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		return nil
 	}
 
+	fmt.Println("Start push", p.layerID, "of size", p.size)
 	res.Body.Close()
 	req, err = http.NewRequest(http.MethodPost, p.url+path.Join("/v2", p.repository, "blobs", "uploads")+"/", nil)
 	if err != nil {
@@ -238,7 +244,7 @@ func (p *pushJob) push(ctx context.Context) error {
 	}
 
 	end := p.size
-	fd, err := os.Open("layers/" + p.layerID)
+	fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
 	if err != nil {
 		return fmt.Errorf("opening layer file: %w", err)
 	}
@@ -254,6 +260,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		rangeHeader := fmt.Sprintf("%d-%d", start, end-1)
 		contentType := "application/octet-stream"
 		contentLength := fmt.Sprintf("%d", end-start)
+		fmt.Println("Sending patch")
 		req, err := http.NewRequest("PATCH", locationForThisUpload, fd)
 		if err != nil {
 			return err
@@ -282,6 +289,7 @@ func (p *pushJob) push(ctx context.Context) error {
 			locationForThisUpload = urlLocation.String()
 		}
 
+		fmt.Println("Finished patch", res.StatusCode, start, res.Header.Get("Range"))
 		if endRes >= end-1 {
 			break
 		}
