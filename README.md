@@ -19,4 +19,5 @@ faster `docker push` that is simpler to maintain, and doesn't
 compress layers.
 
 ## Warning
-This is experimental and mostly to learn more about how Docker stores layers, use at your own risk.
+- If specifying compression level: it uses zstd by default, so it might not work for some use-cases, use --compression-algo to change it.
+- Only works in Linux with Docker's overlay2, this is very experimental.
