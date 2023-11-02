@@ -139,7 +139,7 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 
 	i := strings.LastIndex(imageURL, ":")
 	if i == -1 {
-		return Manifest{}, errors.New("unexpected ':' not found")
+		return Manifest{}, fmt.Errorf("unexpected ':' not found on %s", imageURL)
 	}
 
 	sha, err := repositories.getConfigSHA256(imageURL[:i], imageURL[i+1:])
