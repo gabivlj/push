@@ -1,11 +1,15 @@
 package main
 
 import (
+	"compress/gzip"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"net/http"
 	"net/url"
@@ -44,7 +48,13 @@ func (p *pusher) getAuthorizationHeader() string {
 	return fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte(s)))
 }
 
-func (p *pusher) push(ctx context.Context, url, repository, name string) error {
+type pushConfiguration struct {
+	// 0 -> none
+	// 1, 2, 3...
+	compressionLevel int
+}
+
+func (p *pusher) push(ctx context.Context, url, repository, name string, pushConf pushConfiguration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	wg := &sync.WaitGroup{}
@@ -57,7 +67,7 @@ func (p *pusher) push(ctx context.Context, url, repository, name string) error {
 	done := make(chan struct{}, m)
 	errChann := make(chan error, m)
 	jobs := make([]pushJob, 0, len(p.manifest.Layers)+1)
-	for _, layer := range p.manifest.Layers {
+	for i, layer := range p.manifest.Layers {
 		jobs = append(jobs, pushJob{
 			layerID:             layer.Digest,
 			size:                layer.Size,
@@ -68,6 +78,8 @@ func (p *pusher) push(ctx context.Context, url, repository, name string) error {
 			name:                name,
 			repository:          repository,
 			authorizationHeader: authorizationHeader,
+			layerResult:         &p.manifest.Layers[i],
+			pushConfiguration:   pushConf,
 		})
 	}
 
@@ -81,6 +93,7 @@ func (p *pusher) push(ctx context.Context, url, repository, name string) error {
 		done:                done,
 		errChan:             errChann,
 		authorizationHeader: authorizationHeader,
+		pushConfiguration:   pushConfiguration{compressionLevel: 0},
 	})
 
 	for i := 0; i < m; i++ {
@@ -166,8 +179,10 @@ type pushJob struct {
 	name                string
 	layerID             string
 	size                uint64
+	layerResult         *LayerManifest
 	mediaType           string
 	authorizationHeader string
+	pushConfiguration   pushConfiguration
 	errChan             chan<- error
 	done                chan<- struct{}
 }
@@ -229,6 +244,7 @@ func (p *pushJob) auth(r *http.Request) *http.Request {
 }
 
 func (p *pushJob) push(ctx context.Context) error {
+	wg := &sync.WaitGroup{}
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
 	if err != nil {
@@ -282,38 +298,82 @@ func (p *pushJob) push(ctx context.Context) error {
 		return fmt.Errorf("opening layer file: %w", err)
 	}
 
-	for {
-		if start != 0 {
-			fd, err = os.Open(filepath.Join(layerFolder, p.layerID))
+	defer fd.Close()
+	var sha256Writer hash.Hash
+	var reader io.Reader = fd
+	layerSize := int64(p.size)
+	compressionFinishedSize := int64(-1)
+	var errCompression error
+	if p.pushConfiguration.compressionLevel != 0 {
+		layerSize = -1
+		readerPipe, writePipe := io.Pipe()
+		defer readerPipe.Close()
+		defer writePipe.Close()
+		w, err := gzip.NewWriterLevel(writePipe, p.pushConfiguration.compressionLevel)
+		if err != nil {
+			return fmt.Errorf("init write level: %w", err)
+		}
+
+		counter := &writerN{}
+		wg.Add(1)
+		var readerGzip = fd
+		go func() {
+			defer wg.Done()
+			_, err := io.Copy(w, readerGzip)
 			if err != nil {
-				return fmt.Errorf("opening layer file: %w", err)
+				errCompression = err
 			}
 
-			_, err = fd.Seek(int64(start), 0)
+			w.Flush()
+			readerGzip.Close()
+			writePipe.Close()
+			compressionFinishedSize = counter.n
+		}()
+
+		sha256Writer = sha256.New()
+		reader = io.TeeReader(readerPipe, io.MultiWriter(sha256Writer, counter))
+	}
+
+	for {
+		if seeker, ok := reader.(io.ReadSeeker); start != 0 && ok {
+			_, err = seeker.Seek(int64(start), 0)
 			if err != nil {
 				return fmt.Errorf("seek: %w", err)
 			}
 		}
 
-		if ociMaxChunkSize != -1 && end-start > uint64(ociMaxChunkSize) {
+		// if max chunk is desired, and either unknown layer size or the range surpassing ociMaxChunkSize, trim the range
+		if ociMaxChunkSize != -1 && (end-start > uint64(ociMaxChunkSize) || layerSize == -1) {
 			end = start + uint64(ociMaxChunkSize)
-			if end >= p.size {
-				end = p.size
+			if layerSize != -1 && end >= uint64(layerSize) {
+				end = uint64(layerSize) + start
 			}
 		}
 
-		rangeHeader := fmt.Sprintf("%d-%d", start, end-1)
 		contentType := "application/octet-stream"
-		length := end - start
-		contentLength := fmt.Sprintf("%d", length)
-		req, err := http.NewRequest("PATCH", locationForThisUpload, io.LimitReader(fd, int64(length)))
+		requestReader := reader
+		if ociMaxChunkSize != -1 {
+			requestReader = io.LimitReader(reader, int64(end-start))
+		}
+
+		req, err := http.NewRequest("PATCH", locationForThisUpload, requestReader)
 		if err != nil {
 			return err
 		}
 
 		req.Header.Add("Content-Type", contentType)
-		req.Header.Add("Content-Length", contentLength)
-		req.Header.Add("Content-Range", rangeHeader)
+		if layerSize != -1 {
+			rangeHeader := fmt.Sprintf("%d-%d", start, end-1)
+			length := end - start
+			contentLength := fmt.Sprintf("%d", length)
+			req.Header.Add("Content-Length", contentLength)
+			req.Header.Add("Content-Range", rangeHeader)
+		} else {
+			// we're informing here that either the registry takes it all at once or it should fail.
+			// we're still respecting the OCI-Chunk-Max-Length here
+			req.Header.Add("OCI-Chunk-Compressed", "true")
+		}
+
 		res, err := c.Do(p.auth(req.WithContext(ctx)))
 		if err != nil {
 			return fmt.Errorf("patch upload: %w", err)
@@ -334,9 +394,14 @@ func (p *pushJob) push(ctx context.Context) error {
 			locationForThisUpload = urlLocation.String()
 		}
 
+		// restore end to a maximum layer
 		end = p.size
-		if endRes >= end-1 {
+		if endRes >= end-1 || (compressionFinishedSize != -1 && endRes >= uint64(compressionFinishedSize-1)) {
 			break
+		}
+
+		if errCompression != nil {
+			return fmt.Errorf("error compressing the layer: %w", errCompression)
 		}
 
 		start = endRes + 1
@@ -349,7 +414,13 @@ func (p *pushJob) push(ctx context.Context) error {
 	}
 
 	q := endURL.Query()
-	q.Set("digest", p.layerID)
+	layerID := p.layerID
+	if sha256Writer != nil {
+		hash := sha256Writer.Sum([]byte{})
+		layerID = fmt.Sprintf("sha256:%s", string(hex.EncodeToString(hash)))
+	}
+
+	q.Set("digest", layerID)
 	endURL.RawQuery = q.Encode()
 	req, err = http.NewRequest("PUT", endURL.String(), nil)
 	if err != nil {
@@ -367,5 +438,11 @@ func (p *pushJob) push(ctx context.Context) error {
 	}
 
 	res.Body.Close()
+	if p.pushConfiguration.compressionLevel != 0 && p.layerResult != nil {
+		p.layerResult.Digest = layerID
+		p.layerResult.MediaType = "application/vnd.oci.image.layer.v1.tar+gzip"
+		p.layerResult.Size = uint64(compressionFinishedSize)
+	}
+
 	return nil
 }

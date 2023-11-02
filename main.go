@@ -13,6 +13,7 @@ import (
 
 var passwordStdin = flag.Bool("password-stdin", false, "if you want to use a password from stdin")
 var username = flag.String("username", "", "if you're authenticating, you should set the username")
+var compressionLevel = flag.Int("compression-level", 0, "compresssion level from 0 (no compression at all) to 9 (max compression)")
 
 func main() {
 	if len(os.Args) == 1 {
@@ -64,7 +65,7 @@ func main() {
 	path := u.Path
 	tagIndex := strings.LastIndex(path, ":")
 	domainWithProto := "http://" + u.Host
-	if err := p.push(context.Background(), domainWithProto, path[:tagIndex], path[tagIndex+1:]); err != nil {
+	if err := p.push(context.Background(), domainWithProto, path[:tagIndex], path[tagIndex+1:], pushConfiguration{compressionLevel: *compressionLevel}); err != nil {
 		fmt.Fprintln(os.Stderr, "pushing image", err.Error())
 		os.Exit(1)
 	}
