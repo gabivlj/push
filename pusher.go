@@ -1,7 +1,6 @@
 package main
 
 import (
-	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -52,6 +51,8 @@ type pushConfiguration struct {
 	// 0 -> none
 	// 1, 2, 3...
 	compressionLevel int
+
+	algo CompressionAlgorithm
 }
 
 func (p *pusher) push(ctx context.Context, url, repository, name string, pushConf pushConfiguration) error {
@@ -243,8 +244,7 @@ func (p *pushJob) auth(r *http.Request) *http.Request {
 	return r
 }
 
-func (p *pushJob) push(ctx context.Context) error {
-	wg := &sync.WaitGroup{}
+func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
 	if err != nil {
@@ -292,6 +292,31 @@ func (p *pushJob) push(ctx context.Context) error {
 		ociMaxChunkSize = -1
 	}
 
+	defer func() {
+		if returnErrOverride != nil {
+			req, err = http.NewRequest(http.MethodDelete, locationForThisUpload, nil)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Internal error creating request for deleting upload", err)
+				return
+			}
+
+			ctxTimeout, cancel := context.WithTimeout(context.Background(), time.Second*2)
+			defer cancel()
+			res, err = c.Do(p.auth(req.WithContext(ctxTimeout)))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "Internal error sending request for deleting upload", err)
+				return
+			}
+
+			if res.StatusCode >= 300 {
+				fmt.Fprintln(os.Stderr, "Internal error sending request for deleting upload (status code)", res.StatusCode, readAllBody(res.Body))
+				return
+			}
+
+			fmt.Println("Deleted upload", locationForThisUpload)
+		}
+	}()
+
 	end := p.size
 	fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
 	if err != nil {
@@ -301,39 +326,31 @@ func (p *pushJob) push(ctx context.Context) error {
 	defer fd.Close()
 	var sha256Writer hash.Hash
 	var reader io.Reader = fd
+	// the total layer size for the content-length.
+	// When this is -1, it means that the layer size is unknown (due to compression)
 	layerSize := int64(p.size)
-	compressionFinishedSize := int64(-1)
-	var errCompression error
+
+	// If there is an unknown layer size, we have to know when that async writer stopped giving us bytes
+	finished := make(<-chan struct{})
+
+	// Writer that is able to get the number of bytes that are written
+	counter := &writerN{}
+
+	// Setup unknown layer size due to compression
 	if p.pushConfiguration.compressionLevel != 0 {
 		layerSize = -1
-		readerPipe, writePipe := io.Pipe()
-		defer readerPipe.Close()
-		defer writePipe.Close()
-		w, err := gzip.NewWriterLevel(writePipe, p.pushConfiguration.compressionLevel)
+		readerPipe, finishedReader, err := newCompressionReader(ctx, fd, p.pushConfiguration.compressionLevel, p.pushConfiguration.algo)
 		if err != nil {
-			return fmt.Errorf("init write level: %w", err)
+			return fmt.Errorf("compression reader: %w", err)
 		}
 
-		counter := &writerN{}
-		wg.Add(1)
-		var readerGzip = fd
-		go func() {
-			defer wg.Done()
-			_, err := io.Copy(w, readerGzip)
-			if err != nil {
-				errCompression = err
-			}
-
-			w.Flush()
-			readerGzip.Close()
-			writePipe.Close()
-			compressionFinishedSize = counter.n
-		}()
-
+		finished = finishedReader
+		defer readerPipe.Close()
 		sha256Writer = sha256.New()
 		reader = io.TeeReader(readerPipe, io.MultiWriter(sha256Writer, counter))
 	}
 
+patchLoop:
 	for {
 		if seeker, ok := reader.(io.ReadSeeker); start != 0 && ok {
 			_, err = seeker.Seek(int64(start), 0)
@@ -371,7 +388,7 @@ func (p *pushJob) push(ctx context.Context) error {
 		} else {
 			// we're informing here that either the registry takes it all at once or it should fail.
 			// we're still respecting the OCI-Chunk-Max-Length here
-			req.Header.Add("OCI-Chunk-Compressed", "true")
+			req.Header.Add("OCI-Chunk-Compressed", p.pushConfiguration.algo)
 		}
 
 		res, err := c.Do(p.auth(req.WithContext(ctx)))
@@ -396,16 +413,20 @@ func (p *pushJob) push(ctx context.Context) error {
 
 		// restore end to a maximum layer
 		end = p.size
-		if endRes >= end-1 || (compressionFinishedSize != -1 && endRes >= uint64(compressionFinishedSize-1)) {
+		if endRes >= end-1 {
 			break
 		}
 
-		if errCompression != nil {
-			return fmt.Errorf("error compressing the layer: %w", errCompression)
+		select {
+		// in case we've configured an async reader that tells us to finish reading
+		case <-finished:
+			if endRes >= uint64(counter.n)-1 {
+				break patchLoop
+			}
+		default:
 		}
 
 		start = endRes + 1
-		fd.Close()
 	}
 
 	endURL, err := url.Parse(locationForThisUpload)
@@ -440,8 +461,8 @@ func (p *pushJob) push(ctx context.Context) error {
 	res.Body.Close()
 	if p.pushConfiguration.compressionLevel != 0 && p.layerResult != nil {
 		p.layerResult.Digest = layerID
-		p.layerResult.MediaType = "application/vnd.oci.image.layer.v1.tar+gzip"
-		p.layerResult.Size = uint64(compressionFinishedSize)
+		p.layerResult.MediaType = "application/vnd.oci.image.layer.v1.tar+" + *compressionAlgorithm
+		p.layerResult.Size = uint64(counter.n)
 	}
 
 	return nil

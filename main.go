@@ -13,11 +13,21 @@ import (
 
 var passwordStdin = flag.Bool("password-stdin", false, "if you want to use a password from stdin")
 var username = flag.String("username", "", "if you're authenticating, you should set the username")
-var compressionLevel = flag.Int("compression-level", 0, "compresssion level from 0 (no compression at all) to 9 (max compression)")
+var compressionLevel = flag.Int("compression-level", 0, "compresssion level\n gzip: from 0 (no compression at all) to 9 (max compression)\nzstd (default): from 0 (no compression at all) to 3 (max compression)")
+var compressionAlgorithm = flag.String("compression-algo", Zstd, "compresssion algorithm to use, can be either gzip or zstd")
+var nJobs = flag.Int("push-workers", 3, "number of workers that should be asynchronously running")
 
 func main() {
 	if len(os.Args) == 1 {
 		fmt.Fprintln(os.Stderr, "usage: <command> <image> <url>")
+		os.Exit(-1)
+	}
+
+	switch *compressionAlgorithm {
+	case Zstd, Gzip:
+	default:
+		fmt.Fprintln(os.Stderr, "unknown algorithm", *compressionAlgorithm)
+		fmt.Fprintln(os.Stderr, "only gzip or zstd are allowed")
 		os.Exit(-1)
 	}
 
@@ -54,7 +64,7 @@ func main() {
 	}
 
 	fmt.Println("> Startup was done in", time.Since(n))
-	p := newPusher(&manifest, 3, &c)
+	p := newPusher(&manifest, *nJobs, &c)
 	urlRaw := os.Args[2]
 	u, err := url.Parse("http://" + urlRaw)
 	if err != nil {
@@ -65,7 +75,7 @@ func main() {
 	path := u.Path
 	tagIndex := strings.LastIndex(path, ":")
 	domainWithProto := "http://" + u.Host
-	if err := p.push(context.Background(), domainWithProto, path[:tagIndex], path[tagIndex+1:], pushConfiguration{compressionLevel: *compressionLevel}); err != nil {
+	if err := p.push(context.Background(), domainWithProto, path[:tagIndex], path[tagIndex+1:], pushConfiguration{compressionLevel: *compressionLevel, algo: *compressionAlgorithm}); err != nil {
 		fmt.Fprintln(os.Stderr, "pushing image", err.Error())
 		os.Exit(1)
 	}
