@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 )
@@ -17,10 +18,23 @@ var username = flag.String("username", "", "if you're authenticating, you should
 var compressionLevel = flag.Int("compression-level", 0, "compresssion level\n gzip: from 0 (no compression at all) to 9 (max compression)\nzstd (default): from 0 (no compression at all) to 3 (max compression)")
 var compressionAlgorithm = flag.String("compression-algo", Zstd, "compresssion algorithm to use, can be either gzip or zstd")
 var nJobs = flag.Int("push-workers", 3, "number of workers that should be asynchronously running")
-var dryRun = flag.Bool("dry-run", false, "If you want to only print what is going to get pushed to the registry")
+var dryRun = flag.Bool("dry-run", false, "If you want to inspect the layers of the image")
 
 func main() {
-	if len(os.Args) == 1 {
+	ctx, cancel := context.WithCancel(context.Background())
+	signalHandler := make(chan os.Signal, 5)
+	signal.Notify(signalHandler, os.Interrupt)
+	go func() {
+		<-signalHandler
+		cancel()
+	}()
+
+	defer func() {
+		cancel()
+		close(signalHandler)
+	}()
+
+	if len(os.Args) <= 2 {
 		fmt.Fprintln(os.Stderr, "usage: <command> <image> <url>")
 		os.Exit(-1)
 	}
@@ -59,7 +73,7 @@ func main() {
 	}
 
 	fmt.Println("> Copying layers from overlay2 to", layerFolder)
-	manifest, err := generateManifestFromDocker(context.Background(), os.Args[1], db)
+	manifest, err := generateManifestFromDocker(ctx, os.Args[1], db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
@@ -84,7 +98,7 @@ func main() {
 	path := u.Path
 	tagIndex := strings.LastIndex(path, ":")
 	domainWithProto := "http://" + u.Host
-	if err := p.push(context.Background(), domainWithProto, path[:tagIndex], path[tagIndex+1:], pushConfiguration{compressionLevel: *compressionLevel, algo: *compressionAlgorithm}); err != nil {
+	if err := p.push(ctx, domainWithProto, path[:tagIndex], path[tagIndex+1:], pushConfiguration{compressionLevel: *compressionLevel, algo: *compressionAlgorithm}); err != nil {
 		fmt.Fprintln(os.Stderr, "pushing image", err.Error())
 		os.Exit(1)
 	}
