@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/url"
@@ -16,6 +17,7 @@ var username = flag.String("username", "", "if you're authenticating, you should
 var compressionLevel = flag.Int("compression-level", 0, "compresssion level\n gzip: from 0 (no compression at all) to 9 (max compression)\nzstd (default): from 0 (no compression at all) to 3 (max compression)")
 var compressionAlgorithm = flag.String("compression-algo", Zstd, "compresssion algorithm to use, can be either gzip or zstd")
 var nJobs = flag.Int("push-workers", 3, "number of workers that should be asynchronously running")
+var dryRun = flag.Bool("dry-run", false, "If you want to only print what is going to get pushed to the registry")
 
 func main() {
 	if len(os.Args) == 1 {
@@ -61,6 +63,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
 		os.Exit(1)
+	}
+
+	if *dryRun {
+		encoder := json.NewEncoder(os.Stdout)
+		encoder.SetIndent("", "\t")
+		encoder.Encode(manifest)
+		return
 	}
 
 	fmt.Println("> Startup was done in", time.Since(n))
