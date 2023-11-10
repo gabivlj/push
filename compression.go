@@ -82,11 +82,7 @@ func newCompressionReader(ctx context.Context, reader io.ReadCloser, level int, 
 			c.err = err
 		}
 
-		type flusher interface{ Flush() error }
-		if f, isFlusher := w.(flusher); isFlusher {
-			f.Flush()
-		}
-
+		w.Close()
 		readerGzip.Close()
 		writePipe.Close()
 		close(c.finished)

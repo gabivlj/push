@@ -245,6 +245,7 @@ func (p *pushJob) auth(r *http.Request) *http.Request {
 }
 
 func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
+	fmt.Println("HEAD request")
 	c := &http.Client{}
 	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
 	if err != nil {
@@ -256,6 +257,7 @@ func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
 		return fmt.Errorf("head: %w", err)
 	}
 
+	fmt.Println("Finished")
 	if res.StatusCode < 300 {
 		return nil
 	}
@@ -391,7 +393,9 @@ patchLoop:
 			req.Header.Add("OCI-Chunk-Compressed", p.pushConfiguration.algo)
 		}
 
+		fmt.Println("Uploading ...")
 		res, err := c.Do(p.auth(req.WithContext(ctx)))
+		fmt.Println("Finished!")
 		if err != nil {
 			return fmt.Errorf("patch upload: %w", err)
 		}
