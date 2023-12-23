@@ -23,6 +23,7 @@ import (
 
 type pusher struct {
 	manifest      *Manifest
+	db            *db
 	maxPushJobs   int
 	configuration *configuration
 }
@@ -32,9 +33,9 @@ type configuration struct {
 	password string
 }
 
-func newPusher(manifest *Manifest, maxPushJobs int, c *configuration) *pusher {
+func newPusher(manifest *Manifest, db *db, maxPushJobs int, c *configuration) *pusher {
 	return &pusher{
-		manifest, maxPushJobs, c,
+		manifest, db, maxPushJobs, c,
 	}
 }
 
@@ -55,6 +56,76 @@ type pushConfiguration struct {
 	algo CompressionAlgorithm
 }
 
+// getCompressedManifest tries to calculate a compressed manifest
+// so it's easier for us to check cached layers in the remote registry.
+// If try-cache is false or compression level is 0 we return the same manifest
+func (p *pusher) getCompressedManifest(ctx context.Context, pushConf pushConfiguration) (Manifest, error) {
+	if pushConf.compressionLevel == 0 || !*tryCache {
+		return *p.manifest, nil
+	}
+
+	resultManifest := *p.manifest
+	resultManifest.Layers = make([]LayerManifest, len(p.manifest.Layers))
+	wg := &sync.WaitGroup{}
+	var prevNode *node
+	errChan := make(chan error, len(resultManifest.Layers))
+	for index, layer := range p.manifest.Layers {
+		index := index
+		wg.Add(1)
+		var currentNode *node
+		if prevNode == nil {
+			currentNode = p.db.Get(layer.Digest)
+		} else {
+			currentNode = p.db.GetChild(prevNode, layer.Digest)
+		}
+
+		go func() {
+			defer wg.Done()
+			reader, err := newLayerReader(currentNode)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			readerCompress, closer, err := newCompressionReader(ctx, reader, pushConf.compressionLevel, pushConf.algo)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			sha256Reader := sha256.New()
+			newLength, err := io.Copy(sha256Reader, readerCompress)
+			if err != nil {
+				errChan <- err
+				return
+			}
+
+			defer readerCompress.Close()
+			select {
+			case <-closer:
+			case <-ctx.Done():
+				return
+			}
+
+			hash := sha256Reader.Sum([]byte{})
+			layerID := fmt.Sprintf("sha256:%s", string(hex.EncodeToString(hash)))
+			resultManifest.Layers[index].Digest = layerID
+			resultManifest.Layers[index].Size = uint64(newLength)
+			resultManifest.Layers[index].MediaType = "application/vnd.oci.image.layer.v1.tar+" + *compressionAlgorithm
+		}()
+		prevNode = currentNode
+	}
+
+	wg.Wait()
+	select {
+	case err := <-errChan:
+		return resultManifest, err
+	default:
+	}
+
+	return resultManifest, nil
+}
+
 func (p *pusher) push(ctx context.Context, url, repository, name string, pushConf pushConfiguration) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -64,30 +135,46 @@ func (p *pusher) push(ctx context.Context, url, repository, name string, pushCon
 		m = len(p.manifest.Layers) + 1
 	}
 
+	// if possible, get the manifest that already has the digests with this compressed configuration for better cache
+	possibleCompressedManifest, err := p.getCompressedManifest(ctx, pushConf)
+	if err != nil {
+		return fmt.Errorf("get compressed manifest: %w", err)
+	}
+
 	authorizationHeader := p.getAuthorizationHeader()
 	done := make(chan struct{}, m)
 	errChann := make(chan error, m)
 	jobs := make([]pushJob, 0, len(p.manifest.Layers)+1)
+	var prevNode *node
 	for i, layer := range p.manifest.Layers {
+		if prevNode == nil {
+			prevNode = p.db.Get(layer.Digest)
+		} else {
+			prevNode = p.db.GetChild(prevNode, layer.Digest)
+		}
+
+		if prevNode == nil {
+			return fmt.Errorf("not found: %v", layer)
+		}
+
+		node := prevNode
 		jobs = append(jobs, pushJob{
-			layerID:             layer.Digest,
-			size:                layer.Size,
-			mediaType:           layer.MediaType,
+			layer: possibleCompressedManifest.Layers[i],
+			// receive here the result of the layer in case we gave a manifest that wasn't compressed
+			layerResult:         &possibleCompressedManifest.Layers[i],
+			node:                node,
 			done:                done,
 			errChan:             errChann,
 			url:                 url,
 			name:                name,
 			repository:          repository,
 			authorizationHeader: authorizationHeader,
-			layerResult:         &p.manifest.Layers[i],
 			pushConfiguration:   pushConf,
 		})
 	}
 
 	jobs = append(jobs, pushJob{
-		layerID:             p.manifest.Config.Digest,
-		mediaType:           p.manifest.Config.MediaType,
-		size:                p.manifest.Config.Size,
+		layer:               LayerManifest(p.manifest.Config),
 		url:                 url,
 		name:                name,
 		repository:          repository,
@@ -149,7 +236,7 @@ forLoop:
 	defer writer.Close()
 	encoder := json.NewEncoder(writer)
 	go func() {
-		if err := encoder.Encode(p.manifest); err != nil {
+		if err := encoder.Encode(possibleCompressedManifest); err != nil {
 			fmt.Fprintln(os.Stderr, "warning encoding manifest:", err.Error())
 		}
 		writer.Close()
@@ -160,7 +247,7 @@ forLoop:
 		return fmt.Errorf("manifest: %w", err)
 	}
 
-	req.Header.Add("Content-Type", p.manifest.MediaType)
+	req.Header.Add("Content-Type", possibleCompressedManifest.MediaType)
 	res, err := c.Do(auth(req.WithContext(ctx), authorizationHeader))
 	if err != nil {
 		return fmt.Errorf("manifest request: %w", err)
@@ -178,10 +265,9 @@ type pushJob struct {
 	url                 string
 	repository          string
 	name                string
-	layerID             string
-	size                uint64
+	node                *node
+	layer               LayerManifest
 	layerResult         *LayerManifest
-	mediaType           string
 	authorizationHeader string
 	pushConfiguration   pushConfiguration
 	errChan             chan<- error
@@ -199,9 +285,9 @@ func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 				return
 			}
 
-			p.errChan <- fmt.Errorf("layer %q: %w", p.layerID, err)
+			p.errChan <- fmt.Errorf("layer %q: %w", p.layer.Digest, err)
 		} else {
-			fmt.Println("======> Finished layer", p.layerID, fmt.Sprintf("(%d", p.size), "bytes)", "in", time.Since(n).String())
+			fmt.Println("======> Finished layer", p.layer.Digest, fmt.Sprintf("(%d", p.layer.Size), "bytes)", "in", time.Since(n).String())
 			p.done <- struct{}{}
 		}
 	}()
@@ -244,31 +330,49 @@ func (p *pushJob) auth(r *http.Request) *http.Request {
 	return r
 }
 
+func (p *pushJob) checkIfLayerExists(ctx context.Context, digest string, c *http.Client) (bool, error) {
+	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", digest), nil)
+	if err != nil {
+		return false, fmt.Errorf("new request: %w", err)
+	}
+
+	res, err := c.Do(p.auth(req.WithContext(ctx)))
+	if err != nil {
+		return false, fmt.Errorf("head %v: %w", digest, err)
+	}
+
+	if res.Body != nil {
+		res.Body.Close()
+	}
+
+	return res.StatusCode < 300, nil
+}
+
+func (p *pushJob) checkIfLayersExists(ctx context.Context, c *http.Client) (bool, error) {
+	if existsCompressed, err := p.checkIfLayerExists(ctx, p.layer.Digest, c); err != nil {
+		return false, err
+	} else if existsCompressed {
+		fmt.Printf("Layer %v exists, skipping...\n", p.layer.Digest)
+		return true, nil
+	}
+
+	return false, nil
+}
+
 func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
-	fmt.Println("HEAD request")
 	c := &http.Client{}
-	req, err := http.NewRequest(http.MethodHead, p.url+path.Join("/v2", p.repository, "blobs", p.layerID), nil)
+	if exists, err := p.checkIfLayersExists(ctx, c); err != nil {
+		return fmt.Errorf("check layers exist: %w", err)
+	} else if exists {
+		return nil
+	}
+
+	req, err := http.NewRequest(http.MethodPost, p.url+path.Join("/v2", p.repository, "blobs", "uploads")+"/", nil)
 	if err != nil {
 		return err
 	}
 
 	res, err := c.Do(p.auth(req.WithContext(ctx)))
-	if err != nil {
-		return fmt.Errorf("head: %w", err)
-	}
-
-	fmt.Println("Finished")
-	if res.StatusCode < 300 {
-		return nil
-	}
-
-	res.Body.Close()
-	req, err = http.NewRequest(http.MethodPost, p.url+path.Join("/v2", p.repository, "blobs", "uploads")+"/", nil)
-	if err != nil {
-		return err
-	}
-
-	res, err = c.Do(p.auth(req.WithContext(ctx)))
 	if err != nil {
 		return fmt.Errorf("post uploads: %w", err)
 	}
@@ -319,10 +423,14 @@ func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
 		}
 	}()
 
-	end := p.size
-	fd, err := os.Open(filepath.Join(layerFolder, p.layerID))
+	end := p.layer.Size
+	if end == 0 {
+		end = 0b1 << 62
+	}
+
+	fd, err := getFileOrLayerReader(p.node, p.layer.Digest)
 	if err != nil {
-		return fmt.Errorf("opening layer file: %w", err)
+		return fmt.Errorf("get layer reader: %w", err)
 	}
 
 	defer fd.Close()
@@ -330,7 +438,7 @@ func (p *pushJob) push(ctx context.Context) (returnErrOverride error) {
 	var reader io.Reader = fd
 	// the total layer size for the content-length.
 	// When this is -1, it means that the layer size is unknown (due to compression)
-	layerSize := int64(p.size)
+	layerSize := int64(p.layer.Size)
 
 	// If there is an unknown layer size, we have to know when that async writer stopped giving us bytes
 	finished := make(<-chan struct{})
@@ -393,9 +501,9 @@ patchLoop:
 			req.Header.Add("OCI-Chunk-Compressed", p.pushConfiguration.algo)
 		}
 
-		fmt.Println("Uploading ...")
+		fmt.Printf("Uploading range %v-%v (%s)\n", start, end, p.layer.Digest)
 		res, err := c.Do(p.auth(req.WithContext(ctx)))
-		fmt.Println("Finished!")
+		fmt.Printf("Finished uploading range %v-%v (%s)\n", start, end, p.layer.Digest)
 		if err != nil {
 			return fmt.Errorf("patch upload: %w", err)
 		}
@@ -416,7 +524,7 @@ patchLoop:
 		}
 
 		// restore end to a maximum layer
-		end = p.size
+		end = p.layer.Size
 		if endRes >= end-1 {
 			break
 		}
@@ -424,6 +532,7 @@ patchLoop:
 		select {
 		// in case we've configured an async reader that tells us to finish reading
 		case <-finished:
+			// this means we finished reading
 			if endRes >= uint64(counter.n)-1 {
 				break patchLoop
 			}
@@ -439,7 +548,7 @@ patchLoop:
 	}
 
 	q := endURL.Query()
-	layerID := p.layerID
+	layerID := p.layer.Digest
 	if sha256Writer != nil {
 		hash := sha256Writer.Sum([]byte{})
 		layerID = fmt.Sprintf("sha256:%s", string(hex.EncodeToString(hash)))
@@ -470,4 +579,24 @@ patchLoop:
 	}
 
 	return nil
+}
+
+func getFileOrLayerReader(n *node, layerID string) (io.ReadCloser, error) {
+	if n == nil {
+		p := filepath.Join(layerFolder, layerID)
+		fd, err := os.Open(p)
+		if err != nil {
+			return nil, err
+		}
+
+		return fd, nil
+	}
+
+	p := filepath.Join(layerFolder, n.diffID)
+	fd, err := os.Open(p)
+	if err != nil {
+		return newLayerReader(n)
+	}
+
+	return fd, nil
 }

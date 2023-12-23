@@ -147,6 +147,8 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		return Manifest{}, fmt.Errorf("get config: %w", err)
 	}
 
+	// TODO: Cache the manifest and don't do this multiple times
+
 	config, configSize, err := sha.IntoImageConfig(layerFolder)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("image config: %w", err)
@@ -161,6 +163,12 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 			prevNode = db.Get(layer)
 		} else {
 			prevNode = db.GetChild(prevNode, layer)
+		}
+
+		// we don't need to calculate size if we are compressing and it's a dry run
+		if *inMemory && *compressionLevel != 0 && !*dryRun {
+			layers = append(layers, noopLayer{size: 0, hash: layer})
+			continue
 		}
 
 		p := filepath.Join(layerFolder, layer)
@@ -188,6 +196,15 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 		i, layer := i, layer
 		go func() {
 			defer wg.Done()
+			// skip if it's in memory
+			if *inMemory {
+				if _, err := io.Copy(io.Discard, layer); err != nil {
+					errs <- fmt.Errorf("copying layer %s: %w", config.Rootfs.DiffIDs[i], err)
+				}
+
+				return
+			}
+
 			p := filepath.Join(layerFolder, config.Rootfs.DiffIDs[i])
 			fd, err := os.Create(p)
 			if err != nil {
@@ -219,6 +236,7 @@ forLoop:
 	}
 
 	m := Manifest{}
+	// TODO: Dry run won't spit the correct hashes, sizes and media types if the user wants to see the compressed one
 	m.Config = ConfigManifest{
 		MediaType: "application/vnd.oci.image.config.v1+json",
 		Size:      uint64(configSize),

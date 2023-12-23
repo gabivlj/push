@@ -19,6 +19,8 @@ var compressionLevel = flag.Int("compression-level", 0, "compresssion level\n gz
 var compressionAlgorithm = flag.String("compression-algo", Zstd, "compresssion algorithm to use, can be either gzip or zstd")
 var nJobs = flag.Int("push-workers", 3, "number of workers that should be asynchronously running")
 var dryRun = flag.Bool("dry-run", false, "If you want to inspect the layers of the image")
+var inMemory = flag.Bool("in-memory", false, "If you don't want to write to /var/lib/push")
+var tryCache = flag.Bool("try-cache", false, "If you want the push tool to try to pre-compress the layer to check cache in remote registry")
 
 func main() {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -72,7 +74,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Println("> Copying layers from overlay2 to", layerFolder)
 	manifest, err := generateManifestFromDocker(ctx, os.Args[1], db)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err.Error())
@@ -87,7 +88,7 @@ func main() {
 	}
 
 	fmt.Println("> Startup was done in", time.Since(n))
-	p := newPusher(&manifest, *nJobs, &c)
+	p := newPusher(&manifest, db, *nJobs, &c)
 	urlRaw := os.Args[2]
 	u, err := url.Parse("http://" + urlRaw)
 	if err != nil {

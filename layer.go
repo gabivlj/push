@@ -75,7 +75,6 @@ func (l *layerReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
-// TODO build chain of things
 func newLayerReader(n *node) (*layerReader, error) {
 	p := filepath.Join("/var", "lib", "docker", "image", storageDriver, "layerdb", "sha256", strings.Split(n.id, ":")[1])
 	cacheIDPath := filepath.Join(p, "cache-id")
@@ -101,7 +100,6 @@ func newLayerReader(n *node) (*layerReader, error) {
 
 	l.deferClean(func() { mfz.Close() })
 	metaUnpacker := storage.NewJSONUnpacker(mfz)
-	// XXX maybe get the absolute path here
 	fileGetter := storage.NewPathFileGetter(pTar)
 	ots := asm.NewOutputTarStream(fileGetter, metaUnpacker)
 	l.deferClean(func() { ots.Close() })
