@@ -165,7 +165,7 @@ func generateManifestFromDocker(ctx context.Context, imageURL string, db *db) (M
 			prevNode = db.GetChild(prevNode, layer)
 		}
 
-		// we don't need to calculate size if we are compressing and it's a dry run
+		// we don't need to calculate size if we are compressing and it's not a dry run
 		if *inMemory && *compressionLevel != 0 && !*dryRun {
 			layers = append(layers, noopLayer{size: 0, hash: layer})
 			continue

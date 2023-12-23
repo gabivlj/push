@@ -287,7 +287,12 @@ func (p *pushJob) startPush(ctx context.Context, wg *sync.WaitGroup) {
 
 			p.errChan <- fmt.Errorf("layer %q: %w", p.layer.Digest, err)
 		} else {
-			fmt.Println("======> Finished layer", p.layer.Digest, fmt.Sprintf("(%d", p.layer.Size), "bytes)", "in", time.Since(n).String())
+			layer := p.layerResult
+			if layer == nil {
+				layer = &p.layer
+			}
+
+			fmt.Println("======> Finished layer", layer.Digest, fmt.Sprintf("(%d", layer.Size), "bytes)", "in", time.Since(n).String())
 			p.done <- struct{}{}
 		}
 	}()
