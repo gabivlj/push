@@ -41,6 +41,12 @@ func main() {
 		os.Exit(-1)
 	}
 
+	flag.CommandLine.Parse(os.Args[3:])
+
+	if *compressionLevel == 0 {
+		fmt.Println("warning: no compression level means not compressed", os.Args[3:])
+	}
+
 	switch *compressionAlgorithm {
 	case Zstd, Gzip:
 	default:
@@ -49,7 +55,6 @@ func main() {
 		os.Exit(-1)
 	}
 
-	flag.CommandLine.Parse(os.Args[3:])
 	c := configuration{}
 	c.username = *username
 	if *passwordStdin {
